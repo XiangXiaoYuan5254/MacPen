@@ -4,6 +4,7 @@ set -euo pipefail
 APP_NAME="MacPen"
 CONFIGURATION="release"
 CREATE_ZIP=1
+CREATE_DMG=1
 SIGN_APP=1
 
 while [[ $# -gt 0 ]]; do
@@ -16,12 +17,16 @@ while [[ $# -gt 0 ]]; do
       CREATE_ZIP=0
       shift
       ;;
+    --no-dmg)
+      CREATE_DMG=0
+      shift
+      ;;
     --skip-sign)
       SIGN_APP=0
       shift
       ;;
     -h|--help)
-      echo "usage: $0 [--configuration debug|release] [--no-zip] [--skip-sign]"
+      echo "usage: $0 [--configuration debug|release] [--no-zip] [--no-dmg] [--skip-sign]"
       exit 0
       ;;
     *)
@@ -44,6 +49,8 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 APP_BINARY="$MACOS_DIR/$APP_NAME"
 ZIP_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).zip"
+DMG_STAGING_DIR="$DIST_DIR/.dmg-staging"
+DMG_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).dmg"
 
 cd "$ROOT_DIR"
 swift build -c "$CONFIGURATION"
@@ -71,7 +78,25 @@ if [[ "$CREATE_ZIP" -eq 1 ]]; then
   (cd "$DIST_DIR" && ditto -c -k --sequesterRsrc --keepParent "$APP_NAME.app" "$(basename "$ZIP_PATH")")
 fi
 
+if [[ "$CREATE_DMG" -eq 1 ]]; then
+  rm -rf "$DMG_STAGING_DIR"
+  mkdir -p "$DMG_STAGING_DIR"
+  ditto "$APP_DIR" "$DMG_STAGING_DIR/$APP_NAME.app"
+  ln -s /Applications "$DMG_STAGING_DIR/Applications"
+  rm -f "$DMG_PATH"
+  hdiutil create \
+    -volname "$APP_NAME" \
+    -srcfolder "$DMG_STAGING_DIR" \
+    -ov \
+    -format UDZO \
+    "$DMG_PATH" >/dev/null
+  rm -rf "$DMG_STAGING_DIR"
+fi
+
 echo "$APP_DIR"
 if [[ "$CREATE_ZIP" -eq 1 ]]; then
   echo "$ZIP_PATH"
+fi
+if [[ "$CREATE_DMG" -eq 1 ]]; then
+  echo "$DMG_PATH"
 fi

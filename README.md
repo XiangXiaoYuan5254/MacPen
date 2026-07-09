@@ -26,8 +26,10 @@ The packaging script writes:
 
 - `dist/MacPen.app`
 - `dist/MacPen-macos-<architecture>.zip`
+- `dist/MacPen-macos-<architecture>.dmg`
 
-The bundle is ad-hoc signed for local distribution. It is not notarized.
+The bundle is ad-hoc signed for local distribution. The DMG includes
+`MacPen.app` and an `/Applications` shortcut. It is not notarized.
 
 ## Codex local run
 
