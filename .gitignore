@@ -4,3 +4,5 @@
 dist/
 *.xcuserstate
 
+# 官网只保存在本地，不公开到 GitHub
+website/
