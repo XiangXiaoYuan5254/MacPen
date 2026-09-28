@@ -65,7 +65,8 @@ if [[ -n "$NOTES_FILE" ]] && grep -q ']]>' "$NOTES_FILE"; then
 fi
 
 if [[ -z "$DOWNLOAD_BASE_URL" ]]; then
-  if [[ -n "$(git status --porcelain)" ]]; then
+  # Untracked files only matter if SwiftPM would compile or bundle them.
+  if [[ -n "$(git status --porcelain --untracked-files=no)" || -n "$(git ls-files --others --exclude-standard -- Sources Assets)" ]]; then
     echo "working tree has uncommitted changes; commit them before releasing" >&2
     exit 1
   fi
