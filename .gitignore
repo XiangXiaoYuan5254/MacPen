@@ -6,3 +6,6 @@ dist/
 
 # 官网只保存在本地，不公开到 GitHub
 website/
+
+# Sparkle EdDSA private key export (keep it out of the repo)
+sparkle-private-key*.txt

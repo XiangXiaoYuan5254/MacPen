@@ -47,12 +47,33 @@ APP_DIR="$DIST_DIR/$APP_NAME.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 APP_BINARY="$MACOS_DIR/$APP_NAME"
 ZIP_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).zip"
 DMG_STAGING_DIR="$DIST_DIR/.dmg-staging"
 DMG_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).dmg"
 
 cd "$ROOT_DIR"
+
+# Info.plist is the single source of truth for the version. Sparkle compares
+# CFBundleVersion, so it must always match the user-facing version string.
+plist_value() {
+  /usr/libexec/PlistBuddy -c "Print :$1" "$ROOT_DIR/Info.plist"
+}
+VERSION="$(plist_value CFBundleShortVersionString)"
+BUILD_VERSION="$(plist_value CFBundleVersion)"
+if [[ "$VERSION" != "$BUILD_VERSION" ]]; then
+  echo "Info.plist version mismatch: CFBundleShortVersionString=$VERSION, CFBundleVersion=$BUILD_VERSION" >&2
+  echo "run: bash Scripts/set_version.sh <version>" >&2
+  exit 1
+fi
+for tag in $(git tag --list 'v*' --points-at HEAD 2>/dev/null); do
+  if [[ "$tag" != "v$VERSION" ]]; then
+    echo "HEAD is tagged $tag but Info.plist says $VERSION" >&2
+    exit 1
+  fi
+done
+
 swift build -c "$CONFIGURATION"
 BUILD_DIR="$(swift build -c "$CONFIGURATION" --show-bin-path)"
 BUILD_BINARY="$BUILD_DIR/$APP_NAME"
@@ -63,14 +84,17 @@ if [[ ! -x "$BUILD_BINARY" ]]; then
 fi
 
 rm -rf "$APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$RESOURCES_DIR" "$FRAMEWORKS_DIR"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$ROOT_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
+ditto "$BUILD_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
 chmod +x "$APP_BINARY"
 
 if [[ "$SIGN_APP" -eq 1 ]]; then
-  codesign --force --deep --sign - "$APP_DIR" >/dev/null
+  # Sparkle.framework ships already signed; --deep would strip its XPC service entitlements.
+  codesign --force --sign - "$APP_DIR" >/dev/null
+  codesign --verify --deep --strict "$APP_DIR"
 fi
 
 if [[ "$CREATE_ZIP" -eq 1 ]]; then

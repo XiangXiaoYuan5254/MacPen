@@ -31,6 +31,35 @@ The packaging script writes:
 The bundle is ad-hoc signed for local distribution. The DMG includes
 `MacPen.app` and an `/Applications` shortcut. It is not notarized.
 
+## Updates and releases
+
+Packaged builds check for updates with [Sparkle](https://sparkle-project.org)
+once a day, and from the menu bar item's "Check for Updates..." entry. The
+feed is the `appcast.xml` attached to the latest GitHub release, and every
+update archive is signed with an EdDSA key. The private key lives in the login
+Keychain of the machine that generated it; its public half is `SUPublicEDKey`
+in `Info.plist`. Back the private key up somewhere safe, because updates cannot
+be signed without it:
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_keys -x sparkle-private-key.txt
+```
+
+`Info.plist` is the only place the version is defined, and `CFBundleVersion`
+must match `CFBundleShortVersionString` because Sparkle compares it. To release:
+
+```sh
+bash Scripts/set_version.sh 0.2.0
+git commit -am "Release 0.2.0"
+git tag v0.2.0
+bash Scripts/release.sh --notes notes.md             # builds dist/ incl. appcast.xml
+bash Scripts/release.sh --notes notes.md --publish   # pushes the tag, creates the GitHub release
+```
+
+`notes.md` is Markdown; it is shown in the update window and used as the
+GitHub release notes. Packaging refuses to run if HEAD is tagged with a version
+that differs from `Info.plist`.
+
 ## Codex local run
 
 ```sh

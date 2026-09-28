@@ -10,9 +10,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var eventHandler: EventHandlerRef?
     private var config = AppConfig.load()
     private var settingsWindowController: SettingsWindowController?
+    private var updates: UpdateController!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        updates = UpdateController()
+        updates.onAvailableUpdateChange = { [weak self] in
+            self?.refreshStatusIcon()
+            self?.refreshMenu()
+        }
         configureStatusItem()
         registerHotKey()
     }
@@ -32,18 +38,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "pencil.tip.crop.circle", accessibilityDescription: "MacPen")
-            image?.isTemplate = true
-            button.image = image
-            button.imagePosition = .imageOnly
-            button.toolTip = "MacPen"
-        }
+        statusItem.button?.imagePosition = .imageOnly
+        refreshStatusIcon()
         refreshMenu()
+    }
+
+    private func refreshStatusIcon() {
+        guard let button = statusItem?.button else { return }
+        let hasUpdate = updates.availableVersion != nil
+        let symbolName = hasUpdate ? "pencil.tip.crop.circle.badge.arrow.forward" : "pencil.tip.crop.circle"
+        let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacPen")
+            ?? NSImage(systemSymbolName: "pencil.tip.crop.circle", accessibilityDescription: "MacPen")
+        image?.isTemplate = true
+        button.image = image
+        button.toolTip = hasUpdate ? "MacPen - Update Available" : "MacPen"
     }
 
     private func refreshMenu() {
         let menu = NSMenu()
+        if let version = updates.availableVersion {
+            menu.addItem(NSMenuItem(title: "Update to \(version)...",
+                                    action: #selector(checkForUpdates),
+                                    keyEquivalent: ""))
+            menu.addItem(NSMenuItem.separator())
+        }
         menu.addItem(NSMenuItem(title: overlay == nil ? "Start Drawing" : "Stop Drawing",
                                 action: #selector(toggleOverlay),
                                 keyEquivalent: ""))
@@ -73,6 +91,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Settings...",
                                 action: #selector(openSettings),
                                 keyEquivalent: ","))
+        if updates.isEnabled {
+            menu.addItem(NSMenuItem(title: "Check for Updates...",
+                                    action: #selector(checkForUpdates),
+                                    keyEquivalent: ""))
+        }
+        let versionItem = NSMenuItem(title: "Version \(UpdateController.currentVersion)",
+                                     action: nil,
+                                     keyEquivalent: "")
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit",
                                 action: #selector(quit),
                                 keyEquivalent: "q"))
@@ -133,6 +162,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         settingsWindowController?.show()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func checkForUpdates() {
+        updates.checkForUpdates()
     }
 
     @objc private func quit() {
