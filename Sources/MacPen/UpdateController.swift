@@ -1,7 +1,7 @@
 import AppKit
 import Sparkle
 
-/// Checks the GitHub release appcast for new versions using Sparkle.
+/// Checks the appcast on helloxxy.com for new versions using Sparkle.
 ///
 /// MacPen is a menu bar app, so scheduled update alerts that arrive while the user
 /// is busy elsewhere are surfaced as a "gentle reminder" in the status menu instead

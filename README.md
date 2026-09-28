@@ -35,8 +35,10 @@ The bundle is ad-hoc signed for local distribution. The DMG includes
 
 Packaged builds check for updates with [Sparkle](https://sparkle-project.org)
 once a day, and from the menu bar item's "Check for Updates..." entry. The
-feed is the `appcast.xml` attached to the latest GitHub release, and every
-update archive is signed with an EdDSA key. The private key lives in the login
+feed is <https://helloxxy.com/works/macpen/downloads/appcast.xml> on the
+website, which serves the update zip from the same server; 0.2.0 still reads
+the `appcast.xml` attached to the latest GitHub release, so releases carry one
+too. Every update archive is signed with an EdDSA key. The private key lives in the login
 Keychain of the machine that generated it; its public half is `SUPublicEDKey`
 in `Info.plist`. Back the private key up somewhere safe, because updates cannot
 be signed without it:
@@ -54,7 +56,10 @@ git commit -am "Release 0.2.0"
 git tag v0.2.0
 bash Scripts/release.sh --notes notes.md             # builds dist/ incl. appcast.xml
 bash Scripts/release.sh --notes notes.md --publish   # pushes the tag, creates the GitHub release
+bash website/scripts/sync-release.sh                 # copies the zip, DMG and appcast.xml to the website
 ```
+
+Then deploy the website so installed copies see the update.
 
 `notes.md` is Markdown; it is shown in the update window and used as the
 GitHub release notes. Packaging refuses to run if HEAD is tagged with a version
