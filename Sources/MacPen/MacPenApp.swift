@@ -5,28 +5,60 @@ import CoreGraphics
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var overlay: OverlayWindowController?
+    private var overlay: OverlayWindowController? {
+        didSet {
+            model.isDrawing = overlay != nil
+            refreshStatusIcon()
+            refreshMenu()
+        }
+    }
     private var hotKeyRef: EventHotKeyRef?
+    private var registeredHotKey: AppConfig.HotKey?
     private var eventHandler: EventHandlerRef?
-    private var config = AppConfig.load()
-    private var settingsWindowController: SettingsWindowController?
+    private let model = AppModel()
+    private var mainWindowController: MainWindowController?
+    private var isMainWindowVisible = false
     private var updates: UpdateController!
 
+    private var config: AppConfig {
+        model.config
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let launchedAsLoginItem = Self.launchedAsLoginItem
         NSApp.setActivationPolicy(.accessory)
         updates = UpdateController()
         updates.onAvailableUpdateChange = { [weak self] in
-            self?.refreshStatusIcon()
-            self?.refreshMenu()
+            guard let self else { return }
+            self.model.availableUpdate = self.updates.availableVersion
+            self.refreshStatusIcon()
+            self.refreshMenu()
         }
+        model.canCheckForUpdates = updates.isEnabled
+        model.toggleDrawing = { [weak self] in self?.toggleOverlay() }
+        model.checkForUpdates = { [weak self] in self?.checkForUpdates() }
+        model.configDidChange = { [weak self] config in self?.apply(config: config) }
+        model.recordingHotKeyDidChange = { [weak self] recording in
+            // The registered hot key would swallow the combination being recorded.
+            if recording {
+                self?.unregisterHotKey()
+            } else {
+                self?.registerHotKey()
+            }
+        }
+        NSApp.mainMenu = makeMainMenu()
         configureStatusItem()
+        installHotKeyHandler()
         registerHotKey()
+        updateActivationPolicy()
+
+        if config.showWindowOnLaunch && !launchedAsLoginItem {
+            showMainWindow()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-        }
+        unregisterHotKey()
         if let eventHandler {
             RemoveEventHandler(eventHandler)
         }
@@ -34,6 +66,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    /// Opening MacPen again from Finder, Launchpad or Spotlight, or clicking its Dock icon.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return false
+    }
+
+    private static var launchedAsLoginItem: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == AEEventID(kAEOpenApplication) else {
+            return false
+        }
+        return event.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
     }
 
     private func configureStatusItem() {
@@ -46,66 +92,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshStatusIcon() {
         guard let button = statusItem?.button else { return }
         let hasUpdate = updates.availableVersion != nil
-        let symbolName = hasUpdate ? "pencil.tip.crop.circle.badge.arrow.forward" : "pencil.tip.crop.circle"
+        let symbolName: String
+        if hasUpdate {
+            symbolName = "pencil.tip.crop.circle.badge.arrow.forward"
+        } else if overlay != nil {
+            symbolName = "pencil.tip.crop.circle.fill"
+        } else {
+            symbolName = "pencil.tip.crop.circle"
+        }
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "MacPen")
             ?? NSImage(systemSymbolName: "pencil.tip.crop.circle", accessibilityDescription: "MacPen")
         image?.isTemplate = true
         button.image = image
-        button.toolTip = hasUpdate ? "MacPen - Update Available" : "MacPen"
+        if hasUpdate {
+            button.toolTip = "MacPen - 有新版本"
+        } else if overlay != nil {
+            button.toolTip = "MacPen - 正在标注"
+        } else {
+            button.toolTip = "MacPen - \(config.hotKey.displayString) 开始标注"
+        }
     }
 
     private func refreshMenu() {
         let menu = NSMenu()
         if let version = updates.availableVersion {
-            menu.addItem(NSMenuItem(title: "Update to \(version)...",
+            menu.addItem(NSMenuItem(title: "更新到 \(version)…",
                                     action: #selector(checkForUpdates),
                                     keyEquivalent: ""))
             menu.addItem(NSMenuItem.separator())
         }
-        menu.addItem(NSMenuItem(title: overlay == nil ? "Start Drawing" : "Stop Drawing",
-                                action: #selector(toggleOverlay),
-                                keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Undo",
+        let toggleItem = NSMenuItem(title: overlay == nil ? "开始标注" : "结束标注",
+                                    action: #selector(toggleOverlay),
+                                    keyEquivalent: config.hotKey.menuKeyEquivalent)
+        toggleItem.keyEquivalentModifierMask = config.hotKey.menuModifierMask
+        menu.addItem(toggleItem)
+        menu.addItem(NSMenuItem(title: "撤销",
                                 action: #selector(undo),
                                 keyEquivalent: "z"))
-        menu.addItem(NSMenuItem(title: "Clear",
+        menu.addItem(NSMenuItem(title: "清空",
                                 action: #selector(clear),
                                 keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Thinner Brush",
+        menu.addItem(NSMenuItem(title: "笔变细",
                                 action: #selector(makeBrushThinner),
                                 keyEquivalent: "["))
-        menu.addItem(NSMenuItem(title: "Thicker Brush",
+        menu.addItem(NSMenuItem(title: "笔变粗",
                                 action: #selector(makeBrushThicker),
                                 keyEquivalent: "]"))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Pointer Mode",
+        menu.addItem(NSMenuItem(title: "鼠标穿透",
                                 action: #selector(togglePointerMode),
                                 keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Snapshot Region",
+        menu.addItem(NSMenuItem(title: "区域截图",
                                 action: #selector(snapshotRegion),
                                 keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Laser Pen",
+        menu.addItem(NSMenuItem(title: "激光笔",
                                 action: #selector(selectLaserPen),
                                 keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Settings...",
-                                action: #selector(openSettings),
+        menu.addItem(NSMenuItem(title: "设置…",
+                                action: #selector(showMainWindow),
                                 keyEquivalent: ","))
         if updates.isEnabled {
-            menu.addItem(NSMenuItem(title: "Check for Updates...",
+            menu.addItem(NSMenuItem(title: "检查更新…",
                                     action: #selector(checkForUpdates),
                                     keyEquivalent: ""))
         }
-        let versionItem = NSMenuItem(title: "Version \(UpdateController.currentVersion)",
+        let versionItem = NSMenuItem(title: "版本 \(UpdateController.currentVersion)",
                                      action: nil,
                                      keyEquivalent: "")
         versionItem.isEnabled = false
         menu.addItem(versionItem)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit",
+        menu.addItem(NSMenuItem(title: "退出 MacPen",
                                 action: #selector(quit),
                                 keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    /// Only shown while MacPen has a Dock icon, i.e. while its window is open.
+    private func makeMainMenu() -> NSMenu {
+        let mainMenu = NSMenu()
+
+        let appMenu = NSMenu(title: "MacPen")
+        appMenu.addItem(NSMenuItem(title: "关于 MacPen",
+                                   action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+                                   keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "设置…",
+                                   action: #selector(showMainWindow),
+                                   keyEquivalent: ","))
+        if updates.isEnabled {
+            appMenu.addItem(NSMenuItem(title: "检查更新…",
+                                       action: #selector(checkForUpdates),
+                                       keyEquivalent: ""))
+        }
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "隐藏 MacPen",
+                                   action: #selector(NSApplication.hide(_:)),
+                                   keyEquivalent: "h"))
+        let hideOthers = NSMenuItem(title: "隐藏其他",
+                                    action: #selector(NSApplication.hideOtherApplications(_:)),
+                                    keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(NSMenuItem(title: "全部显示",
+                                   action: #selector(NSApplication.unhideAllApplications(_:)),
+                                   keyEquivalent: ""))
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(NSMenuItem(title: "退出 MacPen",
+                                   action: #selector(NSApplication.terminate(_:)),
+                                   keyEquivalent: "q"))
+
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(NSMenuItem(title: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(NSMenuItem(title: "关闭",
+                                      action: #selector(NSWindow.performClose(_:)),
+                                      keyEquivalent: "w"))
+        windowMenu.addItem(NSMenuItem(title: "最小化",
+                                      action: #selector(NSWindow.performMiniaturize(_:)),
+                                      keyEquivalent: "m"))
+        NSApp.windowsMenu = windowMenu
+
+        for submenu in [appMenu, editMenu, windowMenu] {
+            let item = NSMenuItem()
+            item.submenu = submenu
+            mainMenu.addItem(item)
+        }
+        return mainMenu
     }
 
     @objc private func toggleOverlay() {
@@ -113,15 +231,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             overlay.dismiss()
             self.overlay = nil
         } else {
-            let controller = OverlayWindowController(config: config)
-            controller.onClose = { [weak self] in
-                self?.overlay = nil
-                self?.refreshMenu()
-            }
-            overlay = controller
-            controller.show()
+            _ = ensureOverlay()
         }
-        refreshMenu()
     }
 
     @objc private func undo() {
@@ -152,15 +263,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ensureOverlay().canvas.selectLaserPen()
     }
 
-    @objc private func openSettings() {
-        if settingsWindowController == nil {
-            settingsWindowController = SettingsWindowController(config: config) { [weak self] newConfig in
-                self?.apply(config: newConfig)
+    @objc private func showMainWindow() {
+        if mainWindowController == nil {
+            let controller = MainWindowController(model: model)
+            controller.onVisibilityChange = { [weak self] visible in
+                self?.isMainWindowVisible = visible
+                self?.updateActivationPolicy()
             }
-        } else {
-            settingsWindowController?.update(config: config)
+            mainWindowController = controller
         }
-        settingsWindowController?.show()
+        mainWindowController?.show()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -179,28 +291,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = OverlayWindowController(config: config)
         controller.onClose = { [weak self] in
             self?.overlay = nil
-            self?.refreshMenu()
         }
         overlay = controller
         controller.show()
-        refreshMenu()
         return controller
     }
 
-    private func registerHotKey() {
-        unregisterHotKey()
-        let hotKeyID = EventHotKeyID(signature: OSType(0x4d50656e), id: 1)
-        let status = RegisterEventHotKey(config.hotKey.keyCode,
-                                         config.hotKey.carbonModifiers,
-                                         hotKeyID,
-                                         GetApplicationEventTarget(),
-                                         0,
-                                         &hotKeyRef)
-        guard status == noErr else {
-            NSLog("RegisterEventHotKey failed: \(status)")
-            return
-        }
+    /// MacPen lives in the menu bar; it only takes a Dock icon (and with it the app
+    /// menu and a place in Command-Tab) while its window is open, or when asked to.
+    private func updateActivationPolicy() {
+        let policy: NSApplication.ActivationPolicy = config.showDockIcon || isMainWindowVisible ? .regular : .accessory
+        guard NSApp.activationPolicy() != policy else { return }
+        NSApp.setActivationPolicy(policy)
+    }
 
+    private func installHotKeyHandler() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
                                       eventKind: UInt32(kEventHotKeyPressed))
         let callback: EventHandlerUPP = { _, event, userData in
@@ -220,23 +325,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                             &eventHandler)
     }
 
+    private func registerHotKey() {
+        unregisterHotKey()
+        let hotKey = config.hotKey
+        registeredHotKey = hotKey
+        let hotKeyID = EventHotKeyID(signature: OSType(0x4d50656e), id: 1)
+        let status = RegisterEventHotKey(hotKey.keyCode,
+                                         hotKey.carbonModifiers,
+                                         hotKeyID,
+                                         GetApplicationEventTarget(),
+                                         0,
+                                         &hotKeyRef)
+        if status == noErr {
+            model.hotKeyError = nil
+        } else {
+            NSLog("RegisterEventHotKey failed: \(status)")
+            model.hotKeyError = "无法使用 \(hotKey.displayString)（错误 \(status)），请换一个组合。"
+        }
+    }
+
     private func unregisterHotKey() {
         if let hotKeyRef {
             UnregisterEventHotKey(hotKeyRef)
             self.hotKeyRef = nil
         }
+        registeredHotKey = nil
     }
 
     private func apply(config: AppConfig) {
-        self.config = config
-        config.save()
-        registerHotKey()
+        if config.hotKey != registeredHotKey && !model.isRecordingHotKey {
+            registerHotKey()
+        }
         overlay?.canvas.apply(config: config)
-        settingsWindowController?.update(config: config)
+        updateActivationPolicy()
+        refreshStatusIcon()
+        refreshMenu()
     }
 }
 
-struct AppConfig: Codable {
+struct AppConfig: Codable, Equatable {
     enum CursorStyle: String, Codable, CaseIterable {
         case whiteRingDot = "white_ring_dot"
         case solidDot = "solid_dot"
@@ -255,9 +382,14 @@ struct AppConfig: Codable {
         }
     }
 
-    struct HotKey: Codable {
+    struct HotKey: Codable, Equatable {
         var key: String
         var modifierKeys: [String]
+
+        /// The key whose virtual key code is `keyCode`, if MacPen supports it as a hot key.
+        static func key(forKeyCode keyCode: UInt32) -> String? {
+            keyCodeMap.first(where: { $0.value == keyCode })?.key
+        }
 
         var keyCode: UInt32 {
             Self.keyCodeMap[key.uppercased()] ?? UInt32(kVK_ANSI_G)
@@ -271,6 +403,39 @@ struct AppConfig: Codable {
 
         var carbonModifiers: UInt32 {
             modifiersValue == 0 ? UInt32(cmdKey | shiftKey) : modifiersValue
+        }
+
+        /// Written the way macOS menus show shortcuts, e.g. "⇧⌘G".
+        var displayString: String {
+            Self.modifierSymbols(carbonModifiers) + key.uppercased()
+        }
+
+        var menuKeyEquivalent: String {
+            let name = key.uppercased()
+            if name.count > 1, name.hasPrefix("F"), let number = Int(name.dropFirst()),
+               let scalar = UnicodeScalar(NSF1FunctionKey + number - 1) {
+                return String(Character(scalar))
+            }
+            return name.lowercased()
+        }
+
+        var menuModifierMask: NSEvent.ModifierFlags {
+            let modifiers = carbonModifiers
+            var mask: NSEvent.ModifierFlags = []
+            if modifiers & UInt32(controlKey) != 0 { mask.insert(.control) }
+            if modifiers & UInt32(optionKey) != 0 { mask.insert(.option) }
+            if modifiers & UInt32(shiftKey) != 0 { mask.insert(.shift) }
+            if modifiers & UInt32(cmdKey) != 0 { mask.insert(.command) }
+            return mask
+        }
+
+        static func modifierSymbols(_ carbonModifiers: UInt32) -> String {
+            var symbols = ""
+            if carbonModifiers & UInt32(controlKey) != 0 { symbols += "⌃" }
+            if carbonModifiers & UInt32(optionKey) != 0 { symbols += "⌥" }
+            if carbonModifiers & UInt32(shiftKey) != 0 { symbols += "⇧" }
+            if carbonModifiers & UInt32(cmdKey) != 0 { symbols += "⌘" }
+            return symbols
         }
 
         private static let modifierMap: [String: UInt32] = [
@@ -310,19 +475,25 @@ struct AppConfig: Codable {
     var laserDuration: Double
     var laserWidth: Double
     var laserColorHex: String
+    var showDockIcon: Bool
+    var showWindowOnLaunch: Bool
 
     init(hotKey: HotKey,
          defaultPenWidth: Double = 4,
          cursorStyle: CursorStyle = .whiteRingDot,
          laserDuration: Double = 1.1,
          laserWidth: Double = 4,
-         laserColorHex: String = "#ff2d20") {
+         laserColorHex: String = "#ff2d20",
+         showDockIcon: Bool = false,
+         showWindowOnLaunch: Bool = true) {
         self.hotKey = hotKey
         self.defaultPenWidth = defaultPenWidth
         self.cursorStyle = cursorStyle
         self.laserDuration = laserDuration
         self.laserWidth = laserWidth
         self.laserColorHex = laserColorHex
+        self.showDockIcon = showDockIcon
+        self.showWindowOnLaunch = showWindowOnLaunch
     }
 
     init(from decoder: Decoder) throws {
@@ -334,6 +505,8 @@ struct AppConfig: Codable {
         laserDuration = try container.decodeIfPresent(Double.self, forKey: .laserDuration) ?? 1.1
         laserWidth = try container.decodeIfPresent(Double.self, forKey: .laserWidth) ?? 4
         laserColorHex = try container.decodeIfPresent(String.self, forKey: .laserColorHex) ?? "#ff2d20"
+        showDockIcon = try container.decodeIfPresent(Bool.self, forKey: .showDockIcon) ?? false
+        showWindowOnLaunch = try container.decodeIfPresent(Bool.self, forKey: .showWindowOnLaunch) ?? true
     }
 
     static func load() -> AppConfig {
@@ -369,6 +542,12 @@ struct AppConfig: Codable {
     private static var configURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/MacPen/config.json")
+    }
+
+    static var snapshotFolder: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Pictures")
+            .appendingPathComponent("MacPen")
     }
 }
 
@@ -635,6 +814,8 @@ final class CanvasView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// Settings can change while the overlay is up (the main window stays usable in
+    /// pointer mode), so this refreshes the current tool without switching modes.
     func apply(config: AppConfig) {
         self.config = config
         penPalette = Pen.basePalette
@@ -642,13 +823,14 @@ final class CanvasView: NSView {
 
         switch tool {
         case .pen:
-            selectPen(currentPenIndex)
+            tool = .pen(penPalette[currentPenIndex])
         case .laser:
-            selectLaserPen()
+            tool = .laser(laserPen)
         default:
-            applyCurrentCursor()
-            needsDisplay = true
+            break
         }
+        applyCurrentCursor()
+        needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -903,10 +1085,14 @@ final class CanvasView: NSView {
         needsDisplay = true
     }
 
+    private var laserPen: Pen {
+        Pen(color: NSColor(hex: config.laserColorHex) ?? .systemRed,
+            width: CGFloat(config.laserWidth),
+            alpha: 1.0)
+    }
+
     func selectLaserPen() {
-        tool = .laser(Pen(color: NSColor(hex: config.laserColorHex) ?? .systemRed,
-                          width: CGFloat(config.laserWidth),
-                          alpha: 1.0))
+        tool = .laser(laserPen)
         pointerMode = false
         window?.ignoresMouseEvents = false
         applyCurrentCursor()
@@ -1147,250 +1333,17 @@ final class CanvasView: NSView {
 
         switch tool {
         case .pen(let pen):
-            return makePenCursor(style: config.cursorStyle,
+            return CursorArt.pen(style: config.cursorStyle,
                                  color: pen.color,
                                  diameter: pen.width * brushScale,
-                                 alpha: max(0.65, pen.alpha))
+                                 alpha: max(0.65, pen.alpha)).cursor
         case .laser(let pen):
-            return makeLaserCursor(color: pen.color, diameter: CGFloat(config.laserWidth))
+            return CursorArt.laser(color: pen.color, diameter: CGFloat(config.laserWidth)).cursor
         case .eraser:
-            return makePenCursor(style: .softRing, color: .black, diameter: 22, alpha: 0.8)
+            return CursorArt.pen(style: .softRing, color: .black, diameter: 22, alpha: 0.8).cursor
         case .snapshot:
             return .crosshair
         }
-    }
-
-    private func makePenCursor(style: AppConfig.CursorStyle, color: NSColor, diameter: CGFloat, alpha: CGFloat) -> NSCursor {
-        switch style {
-        case .whiteRingDot:
-            return makeWhiteRingDotCursor(diameter: diameter)
-        case .solidDot:
-            return makeSolidDotCursor(color: color, diameter: diameter, alpha: alpha)
-        case .crosshair:
-            return makeCrosshairCursor(color: color, diameter: diameter, alpha: alpha)
-        case .softRing:
-            return makeSoftRingCursor(color: color, diameter: diameter, alpha: alpha)
-        case .pencilOutline:
-            return makePencilOutlineCursor()
-        }
-    }
-
-    private func makeWhiteRingDotCursor(diameter: CGFloat) -> NSCursor {
-        let imageSize = NSSize(width: 28, height: 28)
-        let center = NSPoint(x: imageSize.width / 2, y: imageSize.height / 2)
-        let ringDiameter = min(14, max(9, diameter * 0.82 + 5.0))
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        let ringRect = NSRect(x: center.x - ringDiameter / 2,
-                              y: center.y - ringDiameter / 2,
-                              width: ringDiameter,
-                              height: ringDiameter)
-        let coreDiameter = max(2.8, ringDiameter * 0.28)
-        let coreRect = NSRect(x: center.x - coreDiameter / 2,
-                              y: center.y - coreDiameter / 2,
-                              width: coreDiameter,
-                              height: coreDiameter)
-        let shadowRect = ringRect.insetBy(dx: -0.8, dy: -0.8)
-
-        NSColor.black.withAlphaComponent(0.20).setStroke()
-        var outline = NSBezierPath(ovalIn: shadowRect)
-        outline.lineWidth = 1.2
-        outline.stroke()
-
-        NSColor.white.withAlphaComponent(0.98).setStroke()
-        outline = NSBezierPath(ovalIn: ringRect)
-        outline.lineWidth = 1.5
-        outline.stroke()
-
-        NSColor.white.withAlphaComponent(0.98).setFill()
-        NSBezierPath(ovalIn: coreRect).fill()
-        image.unlockFocus()
-
-        return NSCursor(image: image, hotSpot: center)
-    }
-
-    private func makeSolidDotCursor(color: NSColor, diameter: CGFloat, alpha: CGFloat) -> NSCursor {
-        let imageSize = NSSize(width: 28, height: 28)
-        let center = NSPoint(x: imageSize.width / 2, y: imageSize.height / 2)
-        let dotDiameter = min(12, max(6, diameter * 0.9 + 2.0))
-        let dotRect = NSRect(x: center.x - dotDiameter / 2,
-                             y: center.y - dotDiameter / 2,
-                             width: dotDiameter,
-                             height: dotDiameter)
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        color.withAlphaComponent(alpha * 0.25).setFill()
-        NSBezierPath(ovalIn: dotRect.insetBy(dx: -2.8, dy: -2.8)).fill()
-        color.withAlphaComponent(alpha).setFill()
-        NSBezierPath(ovalIn: dotRect).fill()
-        NSColor.white.withAlphaComponent(0.95).setStroke()
-        let outline = NSBezierPath(ovalIn: dotRect.insetBy(dx: 0.6, dy: 0.6))
-        outline.lineWidth = 0.9
-        outline.stroke()
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: center)
-    }
-
-    private func makeCrosshairCursor(color: NSColor, diameter: CGFloat, alpha: CGFloat) -> NSCursor {
-        let imageSize = NSSize(width: 30, height: 30)
-        let center = NSPoint(x: imageSize.width / 2, y: imageSize.height / 2)
-        let dotDiameter = min(7, max(3.2, diameter * 0.38))
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        let path = NSBezierPath()
-        path.lineWidth = 1.0
-        path.move(to: NSPoint(x: center.x - 11, y: center.y))
-        path.line(to: NSPoint(x: center.x - 4.5, y: center.y))
-        path.move(to: NSPoint(x: center.x + 4.5, y: center.y))
-        path.line(to: NSPoint(x: center.x + 11, y: center.y))
-        path.move(to: NSPoint(x: center.x, y: center.y - 11))
-        path.line(to: NSPoint(x: center.x, y: center.y - 4.5))
-        path.move(to: NSPoint(x: center.x, y: center.y + 4.5))
-        path.line(to: NSPoint(x: center.x, y: center.y + 11))
-
-        color.withAlphaComponent(alpha * 0.9).setStroke()
-        path.stroke()
-        NSColor.white.withAlphaComponent(0.95).setFill()
-        NSBezierPath(ovalIn: NSRect(x: center.x - dotDiameter / 2,
-                                    y: center.y - dotDiameter / 2,
-                                    width: dotDiameter,
-                                    height: dotDiameter)).fill()
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: center)
-    }
-
-    private func makeSoftRingCursor(color: NSColor, diameter: CGFloat, alpha: CGFloat) -> NSCursor {
-        let imageSize = NSSize(width: 34, height: 34)
-        let center = NSPoint(x: imageSize.width / 2, y: imageSize.height / 2)
-        let ringDiameter = min(16, max(9, diameter * 0.74 + 4.0))
-        let ringRect = NSRect(x: center.x - ringDiameter / 2,
-                              y: center.y - ringDiameter / 2,
-                              width: ringDiameter,
-                              height: ringDiameter)
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        color.withAlphaComponent(alpha * 0.12).setFill()
-        NSBezierPath(ovalIn: ringRect.insetBy(dx: -4.0, dy: -4.0)).fill()
-        color.withAlphaComponent(alpha * 0.28).setFill()
-        NSBezierPath(ovalIn: ringRect.insetBy(dx: -1.8, dy: -1.8)).fill()
-        NSColor.white.withAlphaComponent(0.96).setStroke()
-        let outline = NSBezierPath(ovalIn: ringRect)
-        outline.lineWidth = 1.3
-        outline.stroke()
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: center)
-    }
-
-    private func makePencilOutlineCursor() -> NSCursor {
-        let imageSize = NSSize(width: 32, height: 32)
-        let hotspot = NSPoint(x: 5.0, y: 6.0)
-        func point(_ x: CGFloat, _ yFromTop: CGFloat) -> NSPoint {
-            NSPoint(x: x, y: imageSize.height - yFromTop)
-        }
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        let strokeColor = NSColor.black.withAlphaComponent(0.96)
-        NSColor.white.withAlphaComponent(0.98).setFill()
-        strokeColor.setStroke()
-
-        let outline = NSBezierPath()
-        outline.lineWidth = 1.8
-        outline.lineCapStyle = .round
-        outline.lineJoinStyle = .round
-        outline.move(to: point(hotspot.x, hotspot.y))
-        outline.line(to: point(10.6, 11.3))
-        outline.line(to: point(22.5, 23.3))
-        outline.curve(to: point(24.8, 28.2),
-                      controlPoint1: point(24.1, 24.8),
-                      controlPoint2: point(25.1, 26.6))
-        outline.line(to: point(20.4, 30.9))
-        outline.line(to: point(8.5, 18.8))
-        outline.line(to: point(hotspot.x, hotspot.y))
-        outline.fill()
-        outline.stroke()
-
-        let nibLines = NSBezierPath()
-        nibLines.lineWidth = 1.45
-        nibLines.lineCapStyle = .round
-        nibLines.lineJoinStyle = .round
-        nibLines.move(to: point(9.8, 12.1))
-        nibLines.line(to: point(13.7, 16.0))
-        nibLines.move(to: point(8.3, 17.4))
-        nibLines.line(to: point(12.8, 12.9))
-        nibLines.stroke()
-
-        let ferrule = NSBezierPath()
-        ferrule.lineWidth = 1.45
-        ferrule.lineCapStyle = .round
-        ferrule.move(to: point(20.8, 24.0))
-        ferrule.line(to: point(24.0, 27.2))
-        ferrule.stroke()
-
-        let accent = NSBezierPath()
-        accent.lineWidth = 1.55
-        accent.lineCapStyle = .round
-        accent.move(to: point(7.7, 2.6))
-        accent.line(to: point(11.0, 2.6))
-        accent.stroke()
-
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: hotspot)
-    }
-
-    private func makeLaserCursor(color: NSColor, diameter: CGFloat) -> NSCursor {
-        let imageSize = NSSize(width: 30, height: 30)
-        let center = NSPoint(x: imageSize.width / 2, y: imageSize.height / 2)
-        let outerDiameter = min(12, max(8, diameter * 0.8 + 4))
-        let innerDiameter = outerDiameter * 0.40
-        let image = NSImage(size: imageSize)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: imageSize).fill()
-
-        let outerRect = NSRect(x: center.x - outerDiameter / 2,
-                               y: center.y - outerDiameter / 2,
-                               width: outerDiameter,
-                               height: outerDiameter)
-        let innerRect = NSRect(x: center.x - innerDiameter / 2,
-                               y: center.y - innerDiameter / 2,
-                               width: innerDiameter,
-                               height: innerDiameter)
-
-        color.withAlphaComponent(0.18).setFill()
-        NSBezierPath(ovalIn: outerRect.insetBy(dx: -3.2, dy: -3.2)).fill()
-
-        color.withAlphaComponent(0.82).setStroke()
-        var path = NSBezierPath(ovalIn: outerRect)
-        path.lineWidth = 1.1
-        path.stroke()
-
-        NSColor.white.withAlphaComponent(0.95).setStroke()
-        path = NSBezierPath(ovalIn: outerRect.insetBy(dx: 1.0, dy: 1.0))
-        path.lineWidth = 0.8
-        path.stroke()
-
-        color.withAlphaComponent(0.98).setFill()
-        NSBezierPath(ovalIn: innerRect).fill()
-
-        NSColor.white.withAlphaComponent(1.0).setFill()
-        NSBezierPath(ovalIn: innerRect.insetBy(dx: innerDiameter * 0.22, dy: innerDiameter * 0.22)).fill()
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: center)
     }
 
     private func drawToolbar() {
@@ -1552,9 +1505,7 @@ final class CanvasView: NSView {
                 return
             }
 
-            let folder = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Pictures")
-                .appendingPathComponent("MacPen")
+            let folder = AppConfig.snapshotFolder
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
 
             let formatter = DateFormatter()
@@ -1811,7 +1762,7 @@ private final class PointerToolbarView: NSView {
     }
 }
 
-private extension NSColor {
+extension NSColor {
     convenience init?(hex: String) {
         let trimmed = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard trimmed.count == 6, let value = Int(trimmed, radix: 16) else { return nil }
@@ -1820,188 +1771,13 @@ private extension NSColor {
                   blue: CGFloat(value & 0xff) / 255.0,
                   alpha: 1.0)
     }
-}
 
-@MainActor
-private final class SettingsWindowController: NSObject {
-    private let window: NSWindow
-    private let onSave: (AppConfig) -> Void
-    private let keyPopup = NSPopUpButton()
-    private let cursorStylePopup = NSPopUpButton()
-    private let commandCheckbox = NSButton(checkboxWithTitle: "Command", target: nil, action: nil)
-    private let shiftCheckbox = NSButton(checkboxWithTitle: "Shift", target: nil, action: nil)
-    private let optionCheckbox = NSButton(checkboxWithTitle: "Option", target: nil, action: nil)
-    private let controlCheckbox = NSButton(checkboxWithTitle: "Control", target: nil, action: nil)
-    private let defaultPenSlider = NSSlider(value: 3, minValue: 1, maxValue: 8, target: nil, action: nil)
-    private let defaultPenValueLabel = NSTextField(labelWithString: "")
-    private let laserWidthSlider = NSSlider(value: 4, minValue: 2, maxValue: 16, target: nil, action: nil)
-    private let laserWidthValueLabel = NSTextField(labelWithString: "")
-    private let laserDurationSlider = NSSlider(value: 1.1, minValue: 0.2, maxValue: 3.0, target: nil, action: nil)
-    private let laserDurationValueLabel = NSTextField(labelWithString: "")
-    private var currentConfig: AppConfig
-    private let supportedKeys = (["A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
-        + ["0","1","2","3","4","5","6","7","8","9"]
-        + ["F1","F2","F3","F4","F5","F6","F7","F8","F9","F10","F11","F12"])
-
-    init(config: AppConfig, onSave: @escaping (AppConfig) -> Void) {
-        self.currentConfig = config
-        self.onSave = onSave
-        self.window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 320),
-                               styleMask: [.titled, .closable],
-                               backing: .buffered,
-                               defer: false)
-        super.init()
-        configureWindow()
-        buildUI()
-        update(config: config)
-    }
-
-    func show() {
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-    }
-
-    func update(config: AppConfig) {
-        currentConfig = config
-        if keyPopup.itemTitles.isEmpty {
-            keyPopup.addItems(withTitles: supportedKeys)
+    var hexString: String? {
+        guard let rgb = usingColorSpace(.sRGB) else { return nil }
+        func byte(_ component: CGFloat) -> Int {
+            Int((min(max(component, 0), 1) * 255).rounded())
         }
-        if cursorStylePopup.itemTitles.isEmpty {
-            cursorStylePopup.addItems(withTitles: AppConfig.CursorStyle.allCases.map(\.title))
-        }
-        keyPopup.selectItem(withTitle: config.hotKey.key.uppercased())
-        cursorStylePopup.selectItem(withTitle: config.cursorStyle.title)
-        commandCheckbox.state = config.hotKey.modifierKeys.contains(where: { ["command", "cmd"].contains($0.lowercased()) }) ? .on : .off
-        shiftCheckbox.state = config.hotKey.modifierKeys.contains(where: { $0.lowercased() == "shift" }) ? .on : .off
-        optionCheckbox.state = config.hotKey.modifierKeys.contains(where: { ["option", "alt"].contains($0.lowercased()) }) ? .on : .off
-        controlCheckbox.state = config.hotKey.modifierKeys.contains(where: { ["control", "ctrl"].contains($0.lowercased()) }) ? .on : .off
-        defaultPenSlider.doubleValue = config.defaultPenWidth
-        laserWidthSlider.doubleValue = config.laserWidth
-        laserDurationSlider.doubleValue = config.laserDuration
-        refreshValueLabels()
-    }
-
-    private func configureWindow() {
-        window.title = "MacPen Settings"
-        window.isReleasedWhenClosed = false
-    }
-
-    private func buildUI() {
-        let root = NSStackView()
-        root.orientation = .vertical
-        root.spacing = 14
-        root.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
-        root.translatesAutoresizingMaskIntoConstraints = false
-
-        let hotkeyRow = formRow(label: "启动快捷键", control: keyPopup)
-        let cursorStyleRow = formRow(label: "笔尖样式", control: cursorStylePopup)
-        let modifierRow = NSStackView(views: [commandCheckbox, shiftCheckbox, optionCheckbox, controlCheckbox])
-        modifierRow.orientation = .horizontal
-        modifierRow.spacing = 12
-
-        defaultPenSlider.target = self
-        defaultPenSlider.action = #selector(sliderChanged)
-        laserWidthSlider.target = self
-        laserWidthSlider.action = #selector(sliderChanged)
-        laserDurationSlider.target = self
-        laserDurationSlider.action = #selector(sliderChanged)
-
-        let defaultPenRow = sliderRow(label: "默认笔粗细", slider: defaultPenSlider, valueLabel: defaultPenValueLabel)
-        let laserWidthRow = sliderRow(label: "激光笔粗细", slider: laserWidthSlider, valueLabel: laserWidthValueLabel)
-        let laserDurationRow = sliderRow(label: "激光停留时间", slider: laserDurationSlider, valueLabel: laserDurationValueLabel)
-
-        let hint = NSTextField(wrappingLabelWithString: "修改后立即保存。全局快捷键重启应用即可继续使用新组合。")
-        hint.textColor = .secondaryLabelColor
-
-        let saveButton = NSButton(title: "保存", target: self, action: #selector(savePressed))
-        saveButton.bezelStyle = .rounded
-        let cancelButton = NSButton(title: "关闭", target: self, action: #selector(closePressed))
-        cancelButton.bezelStyle = .rounded
-        let buttonRow = NSStackView(views: [saveButton, cancelButton])
-        buttonRow.orientation = .horizontal
-        buttonRow.spacing = 10
-        buttonRow.alignment = .trailing
-
-        [hotkeyRow, cursorStyleRow, modifierRow, defaultPenRow, laserWidthRow, laserDurationRow, hint, buttonRow].forEach(root.addArrangedSubview)
-
-        let content = NSView()
-        content.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            root.topAnchor.constraint(equalTo: content.topAnchor),
-            root.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor)
-        ])
-        window.contentView = content
-    }
-
-    private func formRow(label: String, control: NSView) -> NSView {
-        let title = NSTextField(labelWithString: label)
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-        let row = NSStackView(views: [title, control])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 16
-        return row
-    }
-
-    private func sliderRow(label: String, slider: NSSlider, valueLabel: NSTextField) -> NSView {
-        valueLabel.alignment = .right
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        valueLabel.setContentHuggingPriority(.required, for: .horizontal)
-        let title = NSTextField(labelWithString: label)
-        title.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        let top = NSStackView(views: [title, valueLabel])
-        top.orientation = .horizontal
-        top.alignment = .centerY
-        top.distribution = .fillProportionally
-
-        let block = NSStackView(views: [top, slider])
-        block.orientation = .vertical
-        block.spacing = 6
-        return block
-    }
-
-    @objc private func sliderChanged() {
-        refreshValueLabels()
-    }
-
-    @objc private func savePressed() {
-        let modifiers = selectedModifierKeys()
-        let newConfig = AppConfig(
-            hotKey: .init(key: keyPopup.titleOfSelectedItem ?? "G", modifierKeys: modifiers),
-            defaultPenWidth: defaultPenSlider.doubleValue.rounded(),
-            cursorStyle: selectedCursorStyle(),
-            laserDuration: laserDurationSlider.doubleValue,
-            laserWidth: laserWidthSlider.doubleValue.rounded(),
-            laserColorHex: currentConfig.laserColorHex
-        )
-        currentConfig = newConfig
-        onSave(newConfig)
-    }
-
-    @objc private func closePressed() {
-        window.orderOut(nil)
-    }
-
-    private func refreshValueLabels() {
-        defaultPenValueLabel.stringValue = String(format: "%.0f", defaultPenSlider.doubleValue.rounded())
-        laserWidthValueLabel.stringValue = String(format: "%.0f", laserWidthSlider.doubleValue.rounded())
-        laserDurationValueLabel.stringValue = String(format: "%.1fs", laserDurationSlider.doubleValue)
-    }
-
-    private func selectedModifierKeys() -> [String] {
-        var keys: [String] = []
-        if commandCheckbox.state == .on { keys.append("command") }
-        if shiftCheckbox.state == .on { keys.append("shift") }
-        if optionCheckbox.state == .on { keys.append("option") }
-        if controlCheckbox.state == .on { keys.append("control") }
-        return keys
-    }
-
-    private func selectedCursorStyle() -> AppConfig.CursorStyle {
-        AppConfig.CursorStyle.allCases.first(where: { $0.title == cursorStylePopup.titleOfSelectedItem }) ?? .whiteRingDot
+        return String(format: "#%02x%02x%02x", byte(rgb.redComponent), byte(rgb.greenComponent), byte(rgb.blueComponent))
     }
 }
 

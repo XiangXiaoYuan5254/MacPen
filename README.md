@@ -11,9 +11,22 @@ capture.
 swift run MacPen
 ```
 
-MacPen appears as a menu bar item. Use `Cmd+Shift+G` or the menu to toggle the
-annotation overlay. Screen capture features may require macOS Screen Recording
-permission.
+MacPen opens its window on launch, showing that it is running, and keeps running
+in the menu bar after the window is closed. Opening the app again (from Finder,
+Launchpad or Spotlight), the menu bar item's "设置…" entry, or the Dock icon brings
+the window back. Use `Cmd+Shift+G` or the menu to toggle the annotation overlay.
+Screen capture features may require macOS Screen Recording permission.
+
+The window holds every setting, and changes apply immediately:
+
+- the global shortcut (click it and press a new combination) and the keys
+  available while annotating
+- the pen cursor style, with a preview of each
+- pen width, laser pen width, duration and color
+- launch at login, whether the window opens on launch, and whether MacPen keeps
+  a Dock icon when the window is closed
+
+Settings are stored in `~/Library/Application Support/MacPen/config.json`.
 
 ## Build an app bundle
 
@@ -80,3 +93,5 @@ that differs from `Info.plist`.
 - Eraser, undo, clear, and hide/show ink
 - Region screenshot to `~/Pictures/MacPen`
 - Click-through pointer mode
+- Main window with live settings: global shortcut recorder, cursor styles, pen
+  and laser options, launch at login
