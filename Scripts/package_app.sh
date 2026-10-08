@@ -6,6 +6,11 @@ CONFIGURATION="release"
 CREATE_ZIP=1
 CREATE_DMG=1
 SIGN_APP=1
+NOTARIZE=0
+# Developer ID certificate in the login Keychain. "-" signs ad hoc, for local builds only.
+SIGN_IDENTITY="${MACPEN_SIGN_IDENTITY:-Developer ID Application: Li Ming wang (46AL7LQ9T8)}"
+# Notarization credentials saved with: xcrun notarytool store-credentials helloxxy-notary
+NOTARY_PROFILE="${MACPEN_NOTARY_PROFILE:-helloxxy-notary}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,8 +30,12 @@ while [[ $# -gt 0 ]]; do
       SIGN_APP=0
       shift
       ;;
+    --notarize)
+      NOTARIZE=1
+      shift
+      ;;
     -h|--help)
-      echo "usage: $0 [--configuration debug|release] [--no-zip] [--no-dmg] [--skip-sign]"
+      echo "usage: $0 [--configuration debug|release] [--no-zip] [--no-dmg] [--skip-sign] [--notarize]"
       exit 0
       ;;
     *)
@@ -38,6 +47,10 @@ done
 
 if [[ "$CONFIGURATION" != "debug" && "$CONFIGURATION" != "release" ]]; then
   echo "--configuration must be debug or release" >&2
+  exit 2
+fi
+if [[ "$NOTARIZE" -eq 1 && ( "$SIGN_APP" -eq 0 || "$SIGN_IDENTITY" == "-" ) ]]; then
+  echo "--notarize needs a Developer ID signature" >&2
   exit 2
 fi
 
@@ -91,10 +104,48 @@ cp "$ROOT_DIR/Assets/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
 ditto "$BUILD_DIR/Sparkle.framework" "$FRAMEWORKS_DIR/Sparkle.framework"
 chmod +x "$APP_BINARY"
 
+# notarize <file to upload> <file to staple the ticket to>
+notarize() {
+  local result
+  result="$(xcrun notarytool submit "$1" --keychain-profile "$NOTARY_PROFILE" --wait --output-format json)"
+  if [[ "$(plutil -extract status raw -o - - <<<"$result")" != "Accepted" ]]; then
+    echo "notarization of $(basename "$1") failed: $result" >&2
+    echo "see why with: xcrun notarytool log <id> --keychain-profile $NOTARY_PROFILE" >&2
+    exit 1
+  fi
+  xcrun stapler staple -q "$2"
+}
+
 if [[ "$SIGN_APP" -eq 1 ]]; then
-  # Sparkle.framework ships already signed; --deep would strip its XPC service entitlements.
-  codesign --force --sign - "$APP_DIR" >/dev/null
+  # Sign inside out. Sparkle.framework ships signed ad hoc, so each of its executables gets the
+  # app's certificate and the hardened runtime too, or notarization rejects it. No --deep: it
+  # would drop the Downloader XPC service's entitlements.
+  SIGN_ARGS=(--force --sign "$SIGN_IDENTITY")
+  if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    SIGN_ARGS+=(--options runtime --timestamp)
+  fi
+  SPARKLE_DIR="$FRAMEWORKS_DIR/Sparkle.framework/Versions/B"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_DIR/XPCServices/Installer.xpc"
+  codesign "${SIGN_ARGS[@]}" --preserve-metadata=entitlements "$SPARKLE_DIR/XPCServices/Downloader.xpc"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_DIR/Autoupdate"
+  codesign "${SIGN_ARGS[@]}" "$SPARKLE_DIR/Updater.app"
+  codesign "${SIGN_ARGS[@]}" "$FRAMEWORKS_DIR/Sparkle.framework"
+  codesign "${SIGN_ARGS[@]}" "$APP_DIR"
   codesign --verify --deep --strict "$APP_DIR"
+fi
+
+if [[ "$NOTARIZE" -eq 1 ]]; then
+  # The ticket goes into the app itself, so the zip, the DMG and Sparkle updates all carry it.
+  NOTARY_ZIP="$DIST_DIR/.notarize-$APP_NAME.zip"
+  rm -f "$NOTARY_ZIP"
+  ditto -c -k --keepParent "$APP_DIR" "$NOTARY_ZIP"
+  notarize "$NOTARY_ZIP" "$APP_DIR"
+  rm -f "$NOTARY_ZIP"
+  # This Mac may have Gatekeeper turned off, which makes spctl accept anything; only the source counts.
+  spctl -a -vv -t exec "$APP_DIR" 2>&1 | grep -q "source=Notarized Developer ID" || {
+    echo "$APP_DIR is not notarized" >&2
+    exit 1
+  }
 fi
 
 if [[ "$CREATE_ZIP" -eq 1 ]]; then
@@ -115,6 +166,12 @@ if [[ "$CREATE_DMG" -eq 1 ]]; then
     -format UDZO \
     "$DMG_PATH" >/dev/null
   rm -rf "$DMG_STAGING_DIR"
+  if [[ "$SIGN_APP" -eq 1 && "$SIGN_IDENTITY" != "-" ]]; then
+    codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
+  fi
+  if [[ "$NOTARIZE" -eq 1 ]]; then
+    notarize "$DMG_PATH" "$DMG_PATH"
+  fi
 fi
 
 echo "$APP_DIR"

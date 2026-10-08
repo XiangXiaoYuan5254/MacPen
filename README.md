@@ -41,8 +41,21 @@ The packaging script writes:
 - `dist/MacPen-macos-<architecture>.zip`
 - `dist/MacPen-macos-<architecture>.dmg`
 
-The bundle is ad-hoc signed for local distribution. The DMG includes
-`MacPen.app` and an `/Applications` shortcut. It is not notarized.
+The bundle is signed with the Developer ID certificate
+`Developer ID Application: Li Ming wang (46AL7LQ9T8)` and the hardened runtime,
+Sparkle.framework included. The DMG includes `MacPen.app` and an
+`/Applications` shortcut. Without that certificate in your Keychain, sign ad hoc
+for a local build:
+
+```sh
+MACPEN_SIGN_IDENTITY=- bash Scripts/package_app.sh
+```
+
+`Scripts/release.sh` also notarizes the app and the DMG with Apple and staples
+the tickets, using the notarytool credentials saved in the login Keychain as
+`helloxxy-notary` (`MACPEN_NOTARY_PROFILE` picks another). Notarization takes a
+few minutes; keep the Mac unlocked meanwhile, or notarytool cannot read the
+credentials.
 
 ## Updates and releases
 

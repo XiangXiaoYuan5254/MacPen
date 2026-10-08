@@ -81,7 +81,8 @@ if [[ -z "$DOWNLOAD_BASE_URL" ]]; then
   DOWNLOAD_BASE_URL="$SITE_URL/downloads"
 fi
 
-bash "$ROOT_DIR/Scripts/package_app.sh" --configuration release >/dev/null
+# Signs with Developer ID and notarizes the app and the DMG (a few minutes; keep the Mac unlocked).
+bash "$ROOT_DIR/Scripts/package_app.sh" --configuration release --notarize >/dev/null
 
 ARCH="$(uname -m)"
 ZIP_NAME="$APP_NAME-macos-$ARCH.zip"
