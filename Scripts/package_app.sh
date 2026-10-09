@@ -63,10 +63,14 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 APP_BINARY="$MACOS_DIR/$APP_NAME"
 ZIP_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).zip"
-DMG_STAGING_DIR="$DIST_DIR/.dmg-staging"
 DMG_PATH="$DIST_DIR/$APP_NAME-macos-$(uname -m).dmg"
 
 cd "$ROOT_DIR"
+
+if [[ "$CREATE_DMG" -eq 1 ]] && ! command -v uvx >/dev/null; then
+  echo "building the DMG needs uv: brew install uv (or pass --no-dmg)" >&2
+  exit 1
+fi
 
 # Info.plist is the single source of truth for the version. Sparkle compares
 # CFBundleVersion, so it must always match the user-facing version string.
@@ -154,18 +158,18 @@ if [[ "$CREATE_ZIP" -eq 1 ]]; then
 fi
 
 if [[ "$CREATE_DMG" -eq 1 ]]; then
-  rm -rf "$DMG_STAGING_DIR"
-  mkdir -p "$DMG_STAGING_DIR"
-  ditto "$APP_DIR" "$DMG_STAGING_DIR/$APP_NAME.app"
-  ln -s /Applications "$DMG_STAGING_DIR/Applications"
+  # Laid out like 页间's installer, with an arrow from MacPen to the Applications shortcut
+  # (see Scripts/dmg/). dmgbuild runs through uv and must be 1.6.7 or newer: older versions write
+  # a background bookmark that makes Finder skip the background picture.
+  DMG_WORK_DIR="$ROOT_DIR/.build/dmg"
+  swift "$ROOT_DIR/Scripts/dmg/background.swift" "$DMG_WORK_DIR"
   rm -f "$DMG_PATH"
-  hdiutil create \
-    -volname "$APP_NAME" \
-    -srcfolder "$DMG_STAGING_DIR" \
-    -ov \
-    -format UDZO \
-    "$DMG_PATH" >/dev/null
-  rm -rf "$DMG_STAGING_DIR"
+  uvx --python 3.12 --from dmgbuild==1.6.7 dmgbuild -s "$ROOT_DIR/Scripts/dmg/settings.py" \
+    -D app="$APP_DIR" \
+    -D readme="$ROOT_DIR/Scripts/dmg/安装说明.txt" \
+    -D background="$DMG_WORK_DIR/background.png" \
+    -D icon="$RESOURCES_DIR/AppIcon.icns" \
+    "$APP_NAME" "$DMG_PATH" >/dev/null
   if [[ "$SIGN_APP" -eq 1 && "$SIGN_IDENTITY" != "-" ]]; then
     codesign --force --sign "$SIGN_IDENTITY" --timestamp "$DMG_PATH"
   fi

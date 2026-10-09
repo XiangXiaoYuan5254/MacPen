@@ -1,0 +1,21 @@
+MacPen — macOS 安装说明
+
+1. 把左侧“MacPen”图标拖到右侧 Applications（应用程序）文件夹。
+2. 等待复制完成，然后推出此磁盘映像。
+3. 在“应用程序”或 Spotlight 中搜索“MacPen”并打开。
+
+系统要求：macOS 13 Ventura 或更高版本，Apple 芯片（M 系列）。
+
+首次打开
+MacPen 使用 Apple Developer ID 签名，并已通过 Apple 公证，可以直接打开。
+第一次打开时 macOS 会确认一次“这是从互联网下载的 App”，点“打开”即可。
+
+开始使用
+菜单栏会出现 MacPen 的笔形图标，按 ⌘⇧G 开始标注，按 Esc 结束。
+第一次用截图功能时，请在“系统设置 → 隐私与安全性 → 屏幕录制”（macOS 15 起叫“屏幕与系统录音”）
+里允许 MacPen，然后退出并重新打开它。
+
+升级
+MacPen 会自动检查更新，有新版本时提示，点“安装更新”即可。
+
+下载与反馈：https://helloxxy.com/works/macpen/

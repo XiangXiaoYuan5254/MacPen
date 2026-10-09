@@ -43,8 +43,11 @@ The packaging script writes:
 
 The bundle is signed with the Developer ID certificate
 `Developer ID Application: Li Ming wang (46AL7LQ9T8)` and the hardened runtime,
-Sparkle.framework included. The DMG includes `MacPen.app` and an
-`/Applications` shortcut. Without that certificate in your Keychain, sign ad hoc
+Sparkle.framework included. The DMG opens as a window with `MacPen.app`, an
+`/Applications` shortcut, an arrow between them and an install note, laid out
+like 页间's installer (`Scripts/dmg/`). It is built with
+[dmgbuild](https://github.com/dmgbuild/dmgbuild) through `uvx`, so building it
+needs `brew install uv`. Without that certificate in your Keychain, sign ad hoc
 for a local build:
 
 ```sh
